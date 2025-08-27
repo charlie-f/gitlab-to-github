@@ -45,7 +45,7 @@ DEFAULT_EXPORT_DIR = "metadata_export"
 RESUME_STATE_FILE = "transfer_state.json"
 
 
-@dataclass
+@dataclass(frozen=True)
 class UserMapping:
     """Maps GitLab users to GitHub users"""
     gitlab_username: str
@@ -56,7 +56,7 @@ class UserMapping:
     email: Optional[str] = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class TransferState:
     """Tracks transfer progress for resume capability"""
     gitlab_project_id: int
@@ -70,7 +70,7 @@ class TransferState:
     last_checkpoint: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class IssueData:
     """Represents a GitLab issue with all metadata"""
     id: int
@@ -89,7 +89,7 @@ class IssueData:
     gitlab_url: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class MergeRequestData:
     """Represents a GitLab merge request with all metadata"""
     id: int
