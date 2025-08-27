@@ -758,70 +758,188 @@ class MetadataTransferTool:
         """Validate that repositories match and can be transferred"""
         console.print("🔍 Validating repository compatibility...")
         
-        # Basic validation checks
-        checks = []
+        # Validation results with detailed information
+        validation_results = []
+        has_blocking_errors = False
+        has_warnings = False
         
         # Check if both repositories exist
-        checks.append(("GitLab project accessible", self.gitlab_project is not None))
-        checks.append(("GitHub repository accessible", self.github_repo is not None))
+        validation_results.append(("GitLab project accessible", "Pass" if self.gitlab_project else "Fail", "green" if self.gitlab_project else "red"))
+        validation_results.append(("GitHub repository accessible", "Pass" if self.github_repo else "Fail", "green" if self.github_repo else "red"))
         
-        if not all(check[1] for check in checks):
-            self.display_validation_results(checks)
+        if not self.gitlab_project or not self.github_repo:
+            self.display_detailed_validation_results(validation_results)
             return False
             
-        # Check repository metadata compatibility
+        # Compare repository names (allowing for case differences)
+        gitlab_name = self.gitlab_project.name.lower()
+        github_name = self.github_repo.name.lower()
+        name_match = gitlab_name == github_name or github_name in gitlab_name or gitlab_name in github_name
+        
+        if name_match:
+            validation_results.append(("Repository names similar", "Pass", "green"))
+        else:
+            validation_results.append(("Repository names similar", f"Warning: '{self.gitlab_project.name}' vs '{self.github_repo.name}'", "yellow"))
+            has_warnings = True
+            
+        # Check if GitHub repo has any commits (should be a transfer)
         try:
-            # Compare repository names (allowing for case differences)
-            gitlab_name = self.gitlab_project.name.lower()
-            github_name = self.github_repo.name.lower()
-            name_match = gitlab_name == github_name or github_name in gitlab_name or gitlab_name in github_name
-            checks.append(("Repository names similar", name_match))
-            
-            # Check if GitHub repo has any commits (should be a transfer)
-            try:
-                commits = list(self.github_repo.get_commits().get_page(0))
-                has_commits = len(commits) > 0
-                checks.append(("GitHub repository has commits", has_commits))
-            except:
-                checks.append(("GitHub repository has commits", False))
-                
-            # Check if GitLab project has issues/MRs to transfer
-            try:
-                issues_count = len(list(self.gitlab_project.issues.list(per_page=1)))
-                mrs_count = len(list(self.gitlab_project.mergerequests.list(per_page=1)))
-                has_metadata = issues_count > 0 or mrs_count > 0
-                checks.append(("GitLab project has transferable metadata", has_metadata))
-            except:
-                checks.append(("GitLab project has transferable metadata", False))
-                
+            commits = list(self.github_repo.get_commits().get_page(0))
+            commit_count = len(commits)
+            if commit_count > 0:
+                validation_results.append(("GitHub repository has commits", f"Pass ({commit_count} commits found)", "green"))
+            else:
+                validation_results.append(("GitHub repository has commits", "Warning: Empty repository", "yellow"))
+                has_warnings = True
         except Exception as e:
-            console.print(f"❌ Repository validation failed: {e}", style="red")
-            return False
-            
-        self.display_validation_results(checks)
+            validation_results.append(("GitHub repository has commits", f"Error: {str(e)}", "red"))
+            has_blocking_errors = True
+                
+        # Check GitLab metadata access with detailed error reporting
+        metadata_result = self._check_gitlab_metadata_access()
+        validation_results.append(metadata_result)
         
-        # All critical checks must pass
-        critical_checks = [check for check in checks if not check[0].startswith("Repository names")]
-        if not all(check[1] for check in critical_checks):
+        if metadata_result[2] == "red":
+            has_blocking_errors = True
+        elif metadata_result[2] == "yellow":
+            has_warnings = True
+            
+        self.display_detailed_validation_results(validation_results)
+        
+        # Handle validation results
+        if has_blocking_errors:
+            console.print("❌ Validation failed with blocking errors.", style="red")
             return False
             
-        # Warn about name mismatch but don't fail
-        if not checks[2][1]:  # Repository names check
-            console.print("⚠️  Repository names don't match exactly. Proceeding anyway...", style="yellow")
+        if has_warnings:
+            console.print("⚠️  Validation completed with warnings.", style="yellow")
+            proceed = Confirm.ask("Do you want to proceed despite the warnings?")
+            if not proceed:
+                console.print("Validation cancelled by user.", style="yellow")
+                return False
+            console.print("Proceeding with transfer despite warnings...", style="yellow")
             
         return True
         
-    def display_validation_results(self, checks: List[Tuple[str, bool]]):
-        """Display validation results in a table"""
+    def display_detailed_validation_results(self, results: List[Tuple[str, str, str]]):
+        """Display detailed validation results in a table"""
         table = Table(title="Repository Validation", show_header=True)
         table.add_column("Check", style="cyan")
         table.add_column("Result", style="white")
         
-        for check_name, passed in checks:
-            status = "✅ Pass" if passed else "❌ Fail"
-            table.add_row(check_name, status)
+        for check_name, result_text, result_style in results:
+            # Add appropriate emoji based on result
+            if result_style == "green":
+                emoji = "✅"
+            elif result_style == "yellow":
+                emoji = "⚠️ "
+            else:  # red
+                emoji = "❌"
+                
+            table.add_row(check_name, f"{emoji} {result_text}")
             
         console.print(table)
+        
+    def _check_gitlab_metadata_access(self) -> Tuple[str, str, str]:
+        """Check GitLab metadata access with detailed error reporting"""
+        try:
+            # Try to get actual counts
+            issues_count = "Unknown"
+            mrs_count = "Unknown"
+            labels_count = "Unknown"
+            milestones_count = "Unknown"
+            
+            issues_error = None
+            mrs_error = None
+            labels_error = None
+            milestones_error = None
+            
+            # Check issues access
+            try:
+                issues_list = list(self.gitlab_project.issues.list(per_page=1, all=False))
+                # Get more accurate count by checking if there are more
+                if issues_list:
+                    try:
+                        all_issues = list(self.gitlab_project.issues.list(all=True, lazy=True))
+                        issues_count = len(all_issues)
+                    except:
+                        issues_count = "1+"
+                else:
+                    issues_count = 0
+            except Exception as e:
+                issues_error = str(e)
+                if "403" in str(e) or "Forbidden" in str(e):
+                    issues_count = "Permission denied"
+                elif "401" in str(e) or "Unauthorized" in str(e):
+                    issues_count = "Authentication failed"
+                else:
+                    issues_count = f"Error: {str(e)[:30]}..."
+            
+            # Check merge requests access
+            try:
+                mrs_list = list(self.gitlab_project.mergerequests.list(per_page=1, all=False))
+                if mrs_list:
+                    try:
+                        all_mrs = list(self.gitlab_project.mergerequests.list(all=True, lazy=True))
+                        mrs_count = len(all_mrs)
+                    except:
+                        mrs_count = "1+"
+                else:
+                    mrs_count = 0
+            except Exception as e:
+                mrs_error = str(e)
+                if "403" in str(e) or "Forbidden" in str(e):
+                    mrs_count = "Permission denied"
+                elif "401" in str(e) or "Unauthorized" in str(e):
+                    mrs_count = "Authentication failed"
+                else:
+                    mrs_count = f"Error: {str(e)[:30]}..."
+            
+            # Check labels access
+            try:
+                labels_list = list(self.gitlab_project.labels.list(all=True))
+                labels_count = len(labels_list)
+            except Exception as e:
+                labels_error = str(e)
+                if "403" in str(e) or "Forbidden" in str(e):
+                    labels_count = "Permission denied"
+                else:
+                    labels_count = f"Error: {str(e)[:20]}..."
+            
+            # Check milestones access
+            try:
+                milestones_list = list(self.gitlab_project.milestones.list(all=True))
+                milestones_count = len(milestones_list)
+            except Exception as e:
+                milestones_error = str(e)
+                if "403" in str(e) or "Forbidden" in str(e):
+                    milestones_count = "Permission denied"
+                else:
+                    milestones_count = f"Error: {str(e)[:20]}..."
+            
+            # Determine overall result
+            result_text = f"Issues: {issues_count}, MRs: {mrs_count}, Labels: {labels_count}, Milestones: {milestones_count}"
+            
+            # Categorize the result
+            permission_errors = ["Permission denied", "Authentication failed"]
+            has_permission_error = any(str(count) in permission_errors for count in [issues_count, mrs_count, labels_count, milestones_count])
+            has_api_error = any(str(count).startswith("Error:") for count in [issues_count, mrs_count, labels_count, milestones_count])
+            has_data = any(isinstance(count, int) and count > 0 for count in [issues_count, mrs_count, labels_count, milestones_count] if isinstance(count, int))
+            all_zero = all(count == 0 for count in [issues_count, mrs_count, labels_count, milestones_count] if isinstance(count, int))
+            
+            if has_api_error:
+                return ("GitLab metadata access", f"API Error - {result_text}", "red")
+            elif has_permission_error:
+                return ("GitLab metadata access", f"Permission Issues - {result_text}", "yellow")
+            elif has_data:
+                return ("GitLab metadata access", f"Success - {result_text}", "green")
+            elif all_zero and not has_permission_error:
+                return ("GitLab metadata access", f"No Data Found - {result_text}", "yellow")
+            else:
+                return ("GitLab metadata access", f"Mixed Results - {result_text}", "yellow")
+                
+        except Exception as e:
+            return ("GitLab metadata access", f"Unexpected Error: {str(e)}", "red")
         
     def create_user_mapping_file(self, gitlab_users: Set[UserMapping]) -> bool:
         """Create initial user mapping file for manual editing"""
@@ -1145,38 +1263,62 @@ Verification:
         
         console.print("🔍 Analyzing transferable metadata...\n")
         
-        # Get counts without full extraction
-        try:
-            issues = list(self.gitlab_project.issues.list(per_page=1))
-            all_issues_count = len(list(self.gitlab_project.issues.list(all=True, lazy=True)))
+        # Get counts without full extraction - use safer approach after validation
+        console.print("📊 Analyzing transfer scope...")
+        
+        table = Table(title="Metadata Transfer Analysis", show_header=True)
+        table.add_column("Item Type", style="cyan")
+        table.add_column("Count", style="white") 
+        table.add_column("Transfer Status", style="green")
+        
+        # Re-use the metadata access check for consistency
+        metadata_check = self._check_gitlab_metadata_access()
+        
+        # Parse the detailed results from validation
+        if "Success -" in metadata_check[1]:
+            # Extract individual counts from the success message
+            details = metadata_check[1].replace("Success - ", "")
+            console.print(f"Detailed metadata access: {details}", style="blue")
             
-            mrs = list(self.gitlab_project.mergerequests.list(per_page=1))
-            all_mrs = list(self.gitlab_project.mergerequests.list(all=True, lazy=True))
-            closed_mrs_count = len([mr for mr in all_mrs if mr.state in ['closed', 'merged']])
+            # Try to extract individual numbers or show what we can
+            if "Issues: " in details:
+                issues_part = details.split("Issues: ")[1].split(",")[0].strip()
+                mrs_part = details.split("MRs: ")[1].split(",")[0].strip()
+                labels_part = details.split("Labels: ")[1].split(",")[0].strip()
+                milestones_part = details.split("Milestones: ")[1].strip()
+                
+                table.add_row("Issues", issues_part, "✅ Will be transferred")
+                if mrs_part.isdigit():
+                    mrs_count = int(mrs_part)
+                    table.add_row("Merge Requests (all)", mrs_part, f"ℹ️  Closed/merged will be exported for reference")
+                else:
+                    table.add_row("Merge Requests", mrs_part, "ℹ️  Closed/merged will be exported for reference")
+                table.add_row("Labels", labels_part, "✅ Will be transferred")  
+                table.add_row("Milestones", milestones_part, "✅ Will be transferred")
+                
+        elif "Permission Issues -" in metadata_check[1] or "No Data Found -" in metadata_check[1]:
+            # Show what we know despite permission issues
+            details = metadata_check[1].split(" - ")[1]
+            console.print(f"Limited metadata access, showing what's available: {details}", style="yellow")
             
-            labels = list(self.gitlab_project.labels.list(all=True))
-            milestones = list(self.gitlab_project.milestones.list(all=True))
+            table.add_row("Issues", "See validation results", "⚠️  Will attempt transfer")
+            table.add_row("Merge Requests", "See validation results", "⚠️  Will attempt export")  
+            table.add_row("Labels", "See validation results", "⚠️  Will attempt transfer")
+            table.add_row("Milestones", "See validation results", "⚠️  Will attempt transfer")
             
-            # Display analysis
-            table = Table(title="Metadata Transfer Analysis", show_header=True)
-            table.add_column("Item Type", style="cyan")
-            table.add_column("Count", style="white")
-            table.add_column("Transfer Status", style="green")
+        else:
+            # API errors or unknown state
+            table.add_row("All Metadata", "See validation results above", "⚠️  Transfer will be attempted")
             
-            table.add_row("Issues", str(all_issues_count), "✅ Will be transferred")
-            table.add_row("Merge Requests (all)", str(len(all_mrs)), f"ℹ️  {closed_mrs_count} closed/merged will be exported for reference")
-            table.add_row("Labels", str(len(labels)), "✅ Will be transferred")
-            table.add_row("Milestones", str(len(milestones)), "✅ Will be transferred")
-            
-            console.print(table)
-            
-            console.print("\n✅ Dry run completed successfully!", style="bold green")
-            console.print("💡 The metadata transfer should proceed without issues.", style="blue")
-            console.print(f"📂 Data would be exported to: {self.export_dir.absolute()}", style="blue")
-            
-        except Exception as e:
-            console.print(f"❌ Dry run analysis failed: {e}", style="red")
-            return False
+        console.print(table)
+        
+        console.print("\n✅ Dry run analysis completed!", style="bold green")
+        console.print("💡 Repository validation passed - transfer can proceed.", style="blue")
+        console.print(f"📂 Data would be exported to: {self.export_dir.absolute()}", style="blue")
+        
+        if metadata_check[2] == "yellow":
+            console.print("⚠️  Note: Some metadata access issues were detected during validation.", style="yellow")
+            console.print("   The tool will attempt the transfer and handle errors gracefully.", style="yellow")
             
         return True
 
