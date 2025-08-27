@@ -619,16 +619,29 @@ class MetadataTransferTool:
         self.user_mappings = {}
         
     def setup_gitlab_client(self, gitlab_url: str, token: str) -> bool:
-        """Initialize GitLab client"""
+        """Initialize GitLab client with comprehensive error handling"""
         try:
             self.gitlab_client = gitlab.Gitlab(gitlab_url, private_token=token)
             self.gitlab_client.auth()
             
-            current_user = self.gitlab_client.user
-            console.print(f"✅ GitLab authentication successful (User: {current_user.username})", style="green")
+            # Get user info to verify token works
+            try:
+                current_user = self.gitlab_client.user
+                console.print(f"✅ GitLab authentication successful (User: {current_user.username})", style="green")
+                
+                # Check token scopes by trying to access projects
+                try:
+                    projects = self.gitlab_client.projects.list(per_page=1, get_all=False)
+                    console.print(f"✅ Token has project access (found {len(projects)} project{'s' if len(projects) != 1 else ''})", style="green")
+                except Exception as scope_error:
+                    console.print(f"⚠️  Token may have limited project access: {str(scope_error)}", style="yellow")
+                    
+            except Exception as user_error:
+                console.print(f"⚠️  Could not get user info: {str(user_error)}", style="yellow")
+                
             return True
         except Exception as e:
-            console.print(f"❌ GitLab authentication failed: {e}", style="red")
+            console.print(f"❌ GitLab authentication failed: {str(e)}", style="red")
             return False
             
     def setup_github_client(self, token: str) -> bool:
@@ -642,9 +655,10 @@ class MetadataTransferTool:
             console.print(f"❌ GitHub authentication failed: {e}", style="red")
             return False
             
-    def get_gitlab_project(self, project_url: str):
-        """Get GitLab project from URL"""
+    def get_gitlab_project(self, project_url: str) -> bool:
+        """Get GitLab project from URL with multiple fallback strategies"""
         try:
+            # Extract project path from URL
             if project_url.startswith('http'):
                 url_parts = project_url.rstrip('/').split('/')
                 if len(url_parts) >= 4:
@@ -654,12 +668,80 @@ class MetadataTransferTool:
             else:
                 project_path = project_url
                 
-            encoded_path = quote_plus(project_path)
-            self.gitlab_project = self.gitlab_client.projects.get(encoded_path)
-            console.print(f"✅ Found GitLab project: {self.gitlab_project.name}", style="green")
-            return True
+            console.print(f"🔍 Attempting to access project: {project_path}")
+            
+            # Strategy 1: Try with URL encoding
+            try:
+                import urllib.parse
+                encoded_path = urllib.parse.quote(project_path, safe='')
+                console.print(f"   Trying encoded path: {encoded_path}")
+                project = self.gitlab_client.projects.get(encoded_path)
+                console.print(f"✅ Found GitLab project: {project.name}", style="green")
+                self.gitlab_project = project
+                return True
+            except Exception as e1:
+                console.print(f"   Encoded path failed: {str(e1)}", style="yellow")
+                
+            # Strategy 2: Try without encoding
+            try:
+                console.print(f"   Trying unencoded path: {project_path}")
+                project = self.gitlab_client.projects.get(project_path)
+                console.print(f"✅ Found GitLab project: {project.name}", style="green")
+                self.gitlab_project = project
+                return True
+            except Exception as e2:
+                console.print(f"   Unencoded path failed: {str(e2)}", style="yellow")
+                
+            # Strategy 3: Search for the project by name
+            try:
+                project_name = project_path.split('/')[-1]
+                console.print(f"   Searching for project by name: {project_name}")
+                projects = self.gitlab_client.projects.list(search=project_name, all=True)
+                
+                if projects:
+                    console.print(f"   Found {len(projects)} projects matching '{project_name}':")
+                    for i, proj in enumerate(projects[:5]):  # Show first 5
+                        console.print(f"     {i+1}. {proj.path_with_namespace} (ID: {proj.id})")
+                    
+                    # Look for exact match
+                    for proj in projects:
+                        if proj.path_with_namespace == project_path:
+                            console.print(f"✅ Found exact match: {proj.name}", style="green")
+                            self.gitlab_project = proj
+                            return True
+                            
+                    # If no exact match, try the first one that ends with the same path
+                    project_suffix = '/'.join(project_path.split('/')[-2:])  # last 2 parts
+                    for proj in projects:
+                        if proj.path_with_namespace.endswith(project_suffix):
+                            console.print(f"✅ Found partial match: {proj.name} ({proj.path_with_namespace})", style="green")
+                            self.gitlab_project = proj
+                            return True
+                            
+            except Exception as e3:
+                console.print(f"   Search failed: {str(e3)}", style="yellow")
+                
+            # Strategy 4: List accessible projects to help user identify the correct path
+            try:
+                console.print("   Listing your accessible projects to help identify the correct path:")
+                accessible_projects = self.gitlab_client.projects.list(membership=True, per_page=20)
+                
+                if accessible_projects:
+                    console.print("   Your accessible projects:")
+                    for proj in accessible_projects:
+                        console.print(f"     • {proj.path_with_namespace}")
+                        if project_path.lower() in proj.path_with_namespace.lower():
+                            console.print(f"       ^ This might be the one you're looking for!", style="blue")
+                else:
+                    console.print("   No accessible projects found. Check your token permissions.", style="yellow")
+                    
+            except Exception as e4:
+                console.print(f"   Could not list accessible projects: {str(e4)}", style="yellow")
+            
+            raise Exception(f"Could not access project using any strategy. Original error: 404 Project Not Found")
+            
         except Exception as e:
-            console.print(f"❌ Failed to access GitLab project: {e}", style="red")
+            console.print(f"❌ Failed to access GitLab project: {str(e)}", style="red")
             return False
             
     def get_github_repo(self, repo_full_name: str) -> bool:
@@ -1099,22 +1181,10 @@ Verification:
         return True
 
 
-@click.group()
-def cli():
+@click.command()
+@click.option('--dry-run', is_flag=True, help='Perform validation checks without making any changes')
+def main(dry_run):
     """GitLab to GitHub Metadata Transfer Tool"""
-    pass
-
-
-@cli.command()
-@click.option('--gitlab-url', prompt=True, help='GitLab instance URL')
-@click.option('--gitlab-token', prompt=True, hide_input=True, help='GitLab personal access token')
-@click.option('--github-token', prompt=True, hide_input=True, help='GitHub personal access token')
-@click.option('--gitlab-project', prompt=True, help='GitLab project URL or path')
-@click.option('--github-repo', prompt=True, help='GitHub repository (owner/repo)')
-@click.option('--export-dir', default=DEFAULT_EXPORT_DIR, help=f'Export directory (default: {DEFAULT_EXPORT_DIR})')
-@click.option('--dry-run', is_flag=True, help='Perform validation only, no changes')
-def transfer(gitlab_url, gitlab_token, github_token, gitlab_project, github_repo, export_dir, dry_run):
-    """Transfer metadata from GitLab to GitHub"""
     
     mode_text = "DRY RUN MODE - Analysis Only" if dry_run else "Transfer Mode"
     mode_style = "yellow" if dry_run else "blue"
@@ -1127,19 +1197,38 @@ def transfer(gitlab_url, gitlab_token, github_token, gitlab_project, github_repo
         border_style=mode_style
     ))
     
-    # Confirmation
-    console.print(f"\n[bold yellow]Transfer Summary:[/bold yellow]")
-    console.print(f"📤 From: {gitlab_project}")
+    # Collect user inputs - same pattern as gittransfer.py
+    gitlab_url = Prompt.ask("\n[bold]GitLab instance URL[/bold] (e.g., https://gitlab.company.com)")
+    gitlab_token = Prompt.ask("[bold]GitLab personal access token[/bold]", password=True)
+    github_token = Prompt.ask("[bold]GitHub personal access token[/bold]", password=True)
+    
+    gitlab_project_url = Prompt.ask("\n[bold]GitLab project URL or path[/bold] (e.g., https://gitlab.com/owner/repo or owner/repo)")
+    github_repo = Prompt.ask("[bold]GitHub repository (owner/repo)[/bold] (must already exist)")
+    
+    # Ask about export directory
+    use_custom_dir = Confirm.ask("Do you want to use a custom export directory?")
+    export_dir = DEFAULT_EXPORT_DIR
+    if use_custom_dir:
+        export_dir = Prompt.ask("[bold]Export directory[/bold]", default=DEFAULT_EXPORT_DIR)
+        
+    # Ask for dry run if not specified via CLI
+    if not dry_run and not Confirm.ask("\nDo you want to perform the actual transfer now?", default=True):
+        dry_run = True
+        console.print("[yellow]Switching to dry run mode for validation...[/yellow]")
+    
+    # Confirmation - same pattern as gittransfer.py
+    action = "Dry Run Analysis" if dry_run else "Transfer"
+    console.print(f"\n[bold yellow]{action} Summary:[/bold yellow]")
+    console.print(f"📤 From: {gitlab_project_url}")
     console.print(f"📥 To: {github_repo}")
     console.print(f"📂 Export directory: {export_dir}")
     if dry_run:
         console.print("🔍 Mode: Analysis only (no changes will be made)")
     
-    if not dry_run:
-        proceed = Confirm.ask("\nProceed with metadata transfer?")
-        if not proceed:
-            console.print("Transfer cancelled.")
-            return
+    proceed_text = f"Proceed with the {action.lower()}?"
+    if not Confirm.ask(f"\n{proceed_text}"):
+        console.print(f"{action} cancelled.")
+        return
     
     # Perform transfer
     tool = MetadataTransferTool(dry_run=dry_run, export_dir=export_dir)
@@ -1147,33 +1236,19 @@ def transfer(gitlab_url, gitlab_token, github_token, gitlab_project, github_repo
         gitlab_url=gitlab_url,
         gitlab_token=gitlab_token,
         github_token=github_token,
-        gitlab_project_url=gitlab_project,
+        gitlab_project_url=gitlab_project_url,
         github_repo_name=github_repo
     )
     
     if not success:
-        action = "Analysis" if dry_run else "Transfer"
+        action = "Dry run" if dry_run else "Transfer"
         console.print(f"\n❌ {action} failed. Please check the errors above.", style="red")
+        if dry_run:
+            console.print("\n💡 Fix the issues above before attempting the actual transfer.", style="blue")
         exit(1)
     elif dry_run:
         console.print("\n🎯 To perform the actual transfer, run the command again without --dry-run", style="blue")
 
 
-@cli.command()
-@click.option('--export-dir', default=DEFAULT_EXPORT_DIR, help=f'Export directory (default: {DEFAULT_EXPORT_DIR})')
-def export_only(export_dir):
-    """Export GitLab metadata to local files only"""
-    console.print("This feature requires the full transfer command for now.")
-    console.print("Use 'transfer' command and then stop after export if needed.")
-
-
-@cli.command()
-@click.option('--export-dir', default=DEFAULT_EXPORT_DIR, help=f'Export directory (default: {DEFAULT_EXPORT_DIR})')
-def import_only(export_dir):
-    """Import previously exported metadata to GitHub"""
-    console.print("This feature requires the full transfer command for now.")
-    console.print("Use 'transfer' command and ensure export files exist.")
-
-
 if __name__ == "__main__":
-    cli()
+    main()

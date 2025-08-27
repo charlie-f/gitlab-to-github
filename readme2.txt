@@ -28,23 +28,16 @@ Step 1: Install dependencies (if not already done for gittransfer.py)
     pip install -r requirements.txt
 
 Step 2: Run dry-run analysis first (RECOMMENDED)
-    python gittransfer-metadata.py transfer \
-        --gitlab-url https://your.gitlab.com \
-        --gitlab-token your_gitlab_token \
-        --github-token your_github_token \
-        --gitlab-project owner/repo-name \
-        --github-repo owner/repo-name \
-        --dry-run
+    python gittransfer-metadata.py --dry-run
 
-    This shows you exactly what will be transferred without making changes.
+    The tool will prompt you for all required information and show you
+    exactly what will be transferred without making changes.
 
 Step 3: Run the actual transfer
-    python gittransfer-metadata.py transfer \
-        --gitlab-url https://your.gitlab.com \
-        --gitlab-token your_gitlab_token \
-        --github-token your_github_token \
-        --gitlab-project owner/repo-name \
-        --github-repo owner/repo-name
+    python gittransfer-metadata.py
+
+    The tool will prompt you for all required information and perform
+    the transfer. Same interface as the main gittransfer.py tool.
 
 Step 4: Handle user mappings (optional but recommended)
     - Tool creates metadata_export/user_mapping.json
@@ -69,25 +62,27 @@ COMMON SCENARIOS
 ---------------
 
 For gitlab.com to GitHub:
-    python gittransfer-metadata.py transfer \
-        --gitlab-url https://gitlab.com \
-        --gitlab-token glpat-xxxxxxxxxxxxxxxxxxxx \
-        --github-token ghp_xxxxxxxxxxxxxxxxxxxx \
-        --gitlab-project mycompany/myproject \
-        --github-repo mycompany/myproject
+    python gittransfer-metadata.py
+    
+    When prompted, enter:
+    - GitLab URL: https://gitlab.com
+    - GitLab token: glpat-xxxxxxxxxxxxxxxxxxxx
+    - GitHub token: ghp_xxxxxxxxxxxxxxxxxxxx
+    - GitLab project: mycompany/myproject
+    - GitHub repo: mycompany/myproject
 
 For self-hosted GitLab:
-    python gittransfer-metadata.py transfer \
-        --gitlab-url https://gitlab.mycompany.com \
-        --gitlab-token glpat-xxxxxxxxxxxxxxxxxxxx \
-        --github-token ghp_xxxxxxxxxxxxxxxxxxxx \
-        --gitlab-project team/project \
-        --github-repo mycompany/project
+    python gittransfer-metadata.py
+    
+    When prompted, enter:
+    - GitLab URL: https://gitlab.mycompany.com
+    - GitLab token: glpat-xxxxxxxxxxxxxxxxxxxx
+    - GitHub token: ghp_xxxxxxxxxxxxxxxxxxxx
+    - GitLab project: team/project
+    - GitHub repo: mycompany/project
 
-With custom export directory:
-    python gittransfer-metadata.py transfer \
-        --export-dir my_transfer_data \
-        [... other options ...]
+The tool will interactively ask for custom export directory and
+other options, just like gittransfer.py does.
 
 TYPICAL WORKFLOW
 ---------------
